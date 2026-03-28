@@ -122,6 +122,8 @@ class CalendarFeed:
 
             if found:
                 print(f"Calendar: monitoring flights {found}")
+            else:
+                print("Calendar: feed parsed, no active flights found in window")
 
         except Exception as exc:
             print(f"Calendar feed error: {exc}")

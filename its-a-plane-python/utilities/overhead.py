@@ -437,6 +437,7 @@ class Overhead:
 
         data = []
 
+        # Fetch local overhead flights
         try:
             bounds = self._api.get_bounds(ZONE_DEFAULT)
             flights = self._api.get_flights(bounds=bounds)
@@ -528,21 +529,23 @@ class Overhead:
                     except Exception as e:
                         retries -= 1
 
-            # If any calendar flights are currently airborne, show only those
-            # until they land; then normal overhead behaviour resumes.
+        except (ConnectionError, NewConnectionError, MaxRetryError):
+            pass  # local lookup failed; still attempt calendar lookup below
+
+        # Calendar lookup runs independently of local flight lookup so that
+        # a network hiccup fetching overhead flights never prevents a tracked
+        # personal flight from being displayed.
+        try:
             calendar_data = self._lookup_calendar_flights()
             if calendar_data:
                 data = calendar_data
+        except Exception as e:
+            print(f"Calendar lookup error: {e}")
 
-            with self._lock:
-                self._new_data = True
-                self._processing = False
-                self._data = data
-
-        except (ConnectionError, NewConnectionError, MaxRetryError):
-            with self._lock:
-                self._new_data = False
-                self._processing = False
+        with self._lock:
+            self._new_data = True
+            self._processing = False
+            self._data = data
                 
     # Properties
     @property
