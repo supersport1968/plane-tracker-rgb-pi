@@ -307,16 +307,20 @@ class Overhead:
         flight is currently airborne, or None otherwise.
         """
         try:
+            print(f"Calendar: searching FR24 for {iata_num}")
             search_results = self._api.search(iata_num)
             if not isinstance(search_results, dict):
+                print(f"Calendar: unexpected search response type for {iata_num}: {type(search_results)}")
                 return None
 
             # FR24 library may return {"results": [...]} or {"flights": [...]}
             items = search_results.get("results", search_results.get("flights", []))
+            print(f"Calendar: FR24 returned {len(items)} result(s) for {iata_num}")
 
             for item in items:
                 # Skip non-live results (airports, airlines, historical, etc.)
                 if item.get("type") not in ("live", None):
+                    print(f"Calendar: skipping non-live result type='{item.get('type')}' for {iata_num}")
                     continue
 
                 flight_id = item.get("id")
@@ -328,12 +332,15 @@ class Overhead:
                 sleep(RATE_LIMIT_DELAY)
                 try:
                     d = self._api.get_flight_details(_FlightProxy(flight_id))
-                except Exception:
+                except Exception as e:
+                    print(f"Calendar: get_flight_details failed for {iata_num} id={flight_id}: {e}")
                     continue
 
                 # Skip if the flight has already landed
                 t = self.safe_get(d, "time") or {}
-                if self.safe_get(t, "real", "arrival"):
+                real_arrival = self.safe_get(t, "real", "arrival")
+                if real_arrival:
+                    print(f"Calendar: {iata_num} already landed (real arrival={real_arrival})")
                     continue
 
                 # Prefer trail (most recent position) over search detail
@@ -349,9 +356,13 @@ class Overhead:
                     alt = detail.get("alt", 0)
 
                 if lat is None or lon is None:
+                    print(f"Calendar: no position data for {iata_num}")
                     continue
                 if alt < MIN_ALTITUDE:
-                    continue  # Not yet at cruise altitude / on the ground
+                    print(f"Calendar: {iata_num} altitude {alt} below minimum {MIN_ALTITUDE}, skipping")
+                    continue
+
+                print(f"Calendar: {iata_num} is airborne at {lat},{lon} alt={alt} — pinning display")
 
                 def clean_code(val):
                     if not val or str(val).upper() in BLANK_FIELDS:

@@ -18,9 +18,10 @@ except ImportError:
     print("Warning: 'icalendar' package not found — calendar feed disabled. "
           "Install with: pip install icalendar")
 
-# Matches IATA/ICAO airline codes (1-3 uppercase letters) + flight number
-# (1-4 digits), with an optional space between, e.g.: AA1234  BA 456  LH1234
-_FLIGHT_RE = re.compile(r'\b([A-Z]{1,3})\s?(\d{1,4})\b')
+# Matches IATA airline codes (exactly 2 uppercase letters) + flight number
+# (1-4 digits), with an optional space between, e.g.: AA1234  BA 456  DL33
+# Exactly 2 letters avoids false positives from dates (MAR28), gates (E10) etc.
+_FLIGHT_RE = re.compile(r'\b([A-Z]{2})\s?(\d{1,4})\b')
 
 # How far back / forward to look for relevant calendar events
 _WINDOW_PAST_HOURS   = 16
