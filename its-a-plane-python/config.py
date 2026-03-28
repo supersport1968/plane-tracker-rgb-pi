@@ -27,4 +27,6 @@ FORECAST_DAYS = 3 #today plus the next two days
 EMAIL = "" #insert your email address between the " ie "example@example.com" to recieve emails when there is a new top 3 flight. Leave "" to recieve no emails. It will log/local webpage regardless
 MAX_FARTHEST = 3 #the amount of furthest flights you want in your log
 MAX_CLOSEST = 3 #the amount of closest flights to your house you want in your log
+CALENDAR_FEED_URL = "" # iCal/ICS URL to monitor for your own flights, e.g. "https://calendar.google.com/calendar/ical/.../basic.ics". Leave "" to disable.
+CALENDAR_CHECK_INTERVAL = 3600 # How often (seconds) to re-fetch the calendar feed
 

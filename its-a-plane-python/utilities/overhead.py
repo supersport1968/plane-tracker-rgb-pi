@@ -18,6 +18,8 @@ from config import (
     MAX_CLOSEST,
 )
 
+from utilities.calendar_feed import CalendarFeed
+
 from setup import email_alerts
 from web import map_generator, upload_helper
 
@@ -28,6 +30,11 @@ try:
 except (ImportError, ModuleNotFoundError, NameError):
     MIN_ALTITUDE = 0
 
+try:
+    from config import CALENDAR_FEED_URL, CALENDAR_CHECK_INTERVAL
+except (ImportError, ModuleNotFoundError, NameError):
+    CALENDAR_FEED_URL = ""
+    CALENDAR_CHECK_INTERVAL = 3600
 
 try:
     from config import ZONE_HOME, LOCATION_HOME
@@ -236,6 +243,18 @@ def log_farthest_flight(entry: dict):
         print("Failed to log farthest flight:", e)
 
 
+# ------------------------------------------------------------------ #
+# Helpers for calendar flight lookups
+# ------------------------------------------------------------------ #
+
+class _FlightProxy:
+    """Minimal stand-in accepted by FlightRadar24API.get_flight_details()."""
+    __slots__ = ("id",)
+
+    def __init__(self, flight_id):
+        self.id = flight_id
+
+
 # Overhead Class
 
 class Overhead:
@@ -246,9 +265,150 @@ class Overhead:
         self._new_data = False
         self._processing = False
 
+        # Start calendar feed if a URL is configured
+        if CALENDAR_FEED_URL:
+            self._calendar = CalendarFeed(CALENDAR_FEED_URL, CALENDAR_CHECK_INTERVAL)
+            self._calendar.start()
+        else:
+            self._calendar = None
+
     # Public
     def grab_data(self):
         Thread(target=self._grab).start()
+
+    # ------------------------------------------------------------------ #
+    # Calendar flight lookups
+    # ------------------------------------------------------------------ #
+
+    def _lookup_calendar_flights(self):
+        """
+        For each IATA flight number currently active in the calendar feed,
+        search FR24 and return a list of data dicts for those that are airborne.
+        Returns an empty list when the calendar is not configured or no flights
+        are currently in the air.
+        """
+        if self._calendar is None:
+            return []
+        flight_numbers = self._calendar.flight_numbers
+        if not flight_numbers:
+            return []
+
+        results = []
+        for iata_num in flight_numbers:
+            entry = self._lookup_single_flight(iata_num)
+            if entry:
+                results.append(entry)
+        return results
+
+    def _lookup_single_flight(self, iata_num):
+        """
+        Search FR24 for a specific IATA flight number (e.g. 'AA1234').
+        Returns a flight data dict (same structure as _grab produces) if the
+        flight is currently airborne, or None otherwise.
+        """
+        try:
+            search_results = self._api.search(iata_num)
+            if not isinstance(search_results, dict):
+                return None
+
+            # FR24 library may return {"results": [...]} or {"flights": [...]}
+            items = search_results.get("results", search_results.get("flights", []))
+
+            for item in items:
+                # Skip non-live results (airports, airlines, historical, etc.)
+                if item.get("type") not in ("live", None):
+                    continue
+
+                flight_id = item.get("id")
+                if not flight_id:
+                    continue
+
+                detail = item.get("detail", {})
+
+                sleep(RATE_LIMIT_DELAY)
+                try:
+                    d = self._api.get_flight_details(_FlightProxy(flight_id))
+                except Exception:
+                    continue
+
+                # Skip if the flight has already landed
+                t = self.safe_get(d, "time") or {}
+                if self.safe_get(t, "real", "arrival"):
+                    continue
+
+                # Prefer trail (most recent position) over search detail
+                trail = d.get("trail", [])
+                if trail:
+                    pos = trail[0]
+                    lat = pos.get("lat")
+                    lon = pos.get("lng")
+                    alt = pos.get("alt", 0)
+                else:
+                    lat = detail.get("lat")
+                    lon = detail.get("lon")
+                    alt = detail.get("alt", 0)
+
+                if lat is None or lon is None:
+                    continue
+                if alt < MIN_ALTITUDE:
+                    continue  # Not yet at cruise altitude / on the ground
+
+                def clean_code(val):
+                    if not val or str(val).upper() in BLANK_FIELDS:
+                        return ""
+                    return val
+
+                plane   = self.safe_get(d, "aircraft", "model", "code", default="")
+                airline = self.safe_get(d, "airline", "name", default="")
+
+                origin      = clean_code(self.safe_get(d, "airport", "origin", "code", "iata", default=""))
+                destination = clean_code(self.safe_get(d, "airport", "destination", "code", "iata", default=""))
+
+                origin_lat = self.safe_get(d, "airport", "origin", "position", "latitude")
+                origin_lon = self.safe_get(d, "airport", "origin", "position", "longitude")
+                dest_lat   = self.safe_get(d, "airport", "destination", "position", "latitude")
+                dest_lon   = self.safe_get(d, "airport", "destination", "position", "longitude")
+
+                dist_o    = haversine(lat, lon, origin_lat, origin_lon) if origin_lat else 0
+                dist_d    = haversine(lat, lon, dest_lat,   dest_lon)   if dest_lat   else 0
+                dist_home = haversine(lat, lon, LOCATION_DEFAULT[0], LOCATION_DEFAULT[1])
+
+                callsign   = detail.get("callsign") or item.get("label", iata_num) or iata_num
+                owner_icao = self.safe_get(d, "owner", "code", "icao", default="") or ""
+                owner_iata = self.safe_get(d, "airline", "code", "iata", default="") or "N/A"
+
+                # Reuse plane_bearing with a lightweight proxy
+                _pos = type("_P", (), {"latitude": lat, "longitude": lon})()
+                direction = degrees_to_cardinal(plane_bearing(_pos))
+
+                return {
+                    "airline":    airline,
+                    "plane":      plane,
+                    "origin":     origin,
+                    "origin_latitude":       origin_lat,
+                    "origin_longitude":      origin_lon,
+                    "destination":           destination,
+                    "destination_latitude":  dest_lat,
+                    "destination_longitude": dest_lon,
+                    "plane_latitude":        lat,
+                    "plane_longitude":       lon,
+                    "owner_iata":            owner_iata,
+                    "owner_icao":            owner_icao,
+                    "time_scheduled_departure": self.safe_get(t, "scheduled", "departure"),
+                    "time_scheduled_arrival":   self.safe_get(t, "scheduled", "arrival"),
+                    "time_real_departure":      self.safe_get(t, "real", "departure"),
+                    "time_estimated_arrival":   self.safe_get(t, "estimated", "arrival"),
+                    "vertical_speed": 0,
+                    "callsign":  callsign,
+                    "distance_origin":      dist_o,
+                    "distance_destination": dist_d,
+                    "distance":  dist_home,
+                    "direction": direction,
+                }
+
+        except Exception as exc:
+            print(f"Calendar flight lookup error ({iata_num}): {exc}")
+        return None
 
     # Safe nested dict access
     def safe_get(self, d, *keys, default=None):
@@ -356,6 +516,12 @@ class Overhead:
 
                     except Exception as e:
                         retries -= 1
+
+            # If any calendar flights are currently airborne, show only those
+            # until they land; then normal overhead behaviour resumes.
+            calendar_data = self._lookup_calendar_flights()
+            if calendar_data:
+                data = calendar_data
 
             with self._lock:
                 self._new_data = True
