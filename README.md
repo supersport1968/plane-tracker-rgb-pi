@@ -240,7 +240,7 @@ sudo pip install . --break-system-packages
 Clone the tracker:
 ```
 cd ~
-git clone https://github.com/c0wsaysmoo/plane-tracker-rgb-pi
+git clone https://github.com/supersport1968/plane-tracker-rgb-pi
 ```
 If the bridge on the bonnet is soldered, you'll need to set HAT_PWM_ENABLED=True in the config file. It's False by default
 
