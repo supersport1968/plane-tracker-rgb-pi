@@ -73,7 +73,10 @@ chmod +x ~/its-a-plane-python/its-a-plane.py
 
 # Project Overview
 
-This project is based on [Colin Waddell's work](https://github.com/ColinWaddell/its-a-plane-python), with some additional features I’ve added.
+This project is a fork of [c0wsaysmoo’s plane-tracker-rgb-pi](https://github.com/c0wsaysmoo/plane-tracker-rgb-pi), which itself is based on the original work by [Colin Waddell](https://github.com/ColinWaddell/its-a-plane-python). Full credit to both for the foundation this project is built on.
+
+Additional features added in this fork:
+- **Calendar feed integration**: automatically tracks your own flights by reading a personal iCal/ICS calendar. When a flight number is detected in a calendar event and that flight is currently airborne, the display locks onto it and shows live flight information until it lands.
 
 ## Clock Screen:
 - Displays time, date, current temperature, and a 3-day forecast.
