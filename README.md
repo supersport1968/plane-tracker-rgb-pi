@@ -256,7 +256,7 @@ rmdir ~/logo ~/logo2
 # 7. Install Python dependencies
 
 ```
-pip install pytz requests beautifulsoup4 FlightRadarAPI folium selenium pillow flask --break-system-packages
+pip install pytz requests beautifulsoup4 FlightRadarAPI folium selenium pillow flask icalendar --break-system-packages
 ```
 If **Bookworm**
 ```
@@ -280,6 +280,20 @@ chmod +x ~/its-a-plane-python/its-a-plane.py
 ```
 nano ~/its-a-plane-python/config.py
 ```
+
+**Calendar Feed (optional)** — if you want the display to automatically track your own flights, set `CALENDAR_FEED_URL` to your personal iCal/ICS link (e.g. from Google Calendar, Apple Calendar, or any flight-booking app that exports `.ics`):
+
+```python
+CALENDAR_FEED_URL = "https://calendar.google.com/calendar/ical/your_calendar_id/basic.ics"
+CALENDAR_CHECK_INTERVAL = 3600  # re-check the calendar every hour
+```
+
+How to find your iCal URL:
+- **Google Calendar**: Settings → your calendar → "Secret address in iCal format"
+- **Apple iCloud**: Calendar app → share icon next to calendar name → copy link
+- **Outlook**: Calendar settings → Shared calendars → Publish → ICS link
+
+When a flight number is detected in a calendar event (e.g. `AA1234` or `BA 456` anywhere in the title or description) and that flight is currently in the air, the display will lock onto it and show live flight information until it lands. Normal overhead plane detection resumes automatically once it lands.
 
 # 10. Run the Script
 
