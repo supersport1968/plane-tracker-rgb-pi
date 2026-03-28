@@ -272,6 +272,9 @@ class Overhead:
         else:
             self._calendar = None
 
+        # Cache for IATA → ICAO airline code mapping, populated on first use
+        self._iata_to_icao = {}
+
     # Public
     def grab_data(self):
         Thread(target=self._grab).start()
@@ -300,122 +303,132 @@ class Overhead:
                 results.append(entry)
         return results
 
+    def _resolve_airline_icao(self, iata_code):
+        """
+        Return the ICAO airline code for a given IATA code (e.g. 'DL' → 'DAL').
+        Builds the mapping from FR24's airline list on first call and caches it.
+        """
+        if not self._iata_to_icao:
+            try:
+                airlines = self._api.get_airlines()
+                for a in airlines:
+                    if not isinstance(a, dict):
+                        continue
+                    iata = (a.get("Code") or a.get("IATA") or a.get("iata") or "").upper()
+                    icao = (a.get("ICAO") or a.get("icao") or "").upper()
+                    if iata and icao:
+                        self._iata_to_icao[iata] = icao
+                print(f"Calendar: loaded {len(self._iata_to_icao)} airline IATA→ICAO mappings")
+            except Exception as e:
+                print(f"Calendar: failed to load airline list: {e}")
+        return self._iata_to_icao.get(iata_code.upper())
+
     def _lookup_single_flight(self, iata_num):
         """
-        Search FR24 for a specific IATA flight number (e.g. 'AA1234').
+        Look up a specific IATA flight number (e.g. 'DL33') via FR24.
+        Resolves the IATA airline code to ICAO, fetches all active flights for
+        that airline, and matches by callsign.
         Returns a flight data dict (same structure as _grab produces) if the
         flight is currently airborne, or None otherwise.
         """
         try:
-            print(f"Calendar: searching FR24 for {iata_num}")
-            search_results = self._api.search(iata_num)
-            if not isinstance(search_results, dict):
-                print(f"Calendar: unexpected search response type for {iata_num}: {type(search_results)}")
+            # iata_num is always 2 letters + digits (enforced by calendar regex)
+            airline_iata = iata_num[:2]
+            flight_number = iata_num[2:]
+
+            airline_icao = self._resolve_airline_icao(airline_iata)
+            if not airline_icao:
+                print(f"Calendar: no ICAO code found for IATA '{airline_iata}', cannot look up {iata_num}")
                 return None
 
-            # FR24 library may return {"results": [...]} or {"flights": [...]}
-            items = search_results.get("results", search_results.get("flights", []))
-            print(f"Calendar: FR24 returned {len(items)} result(s) for {iata_num}")
+            target_callsign = f"{airline_icao}{flight_number}"
+            print(f"Calendar: looking for callsign {target_callsign} in active {airline_icao} flights")
 
-            for item in items:
-                # Skip non-live results (airports, airlines, historical, etc.)
-                if item.get("type") not in ("live", None):
-                    print(f"Calendar: skipping non-live result type='{item.get('type')}' for {iata_num}")
-                    continue
+            flights = self._api.get_flights(airline=airline_icao)
+            match = next((f for f in flights if f.callsign == target_callsign), None)
 
-                flight_id = item.get("id")
-                if not flight_id:
-                    continue
+            if not match:
+                print(f"Calendar: {target_callsign} not found in active {airline_icao} flights")
+                return None
 
-                detail = item.get("detail", {})
+            print(f"Calendar: found {target_callsign} — fetching details")
+            sleep(RATE_LIMIT_DELAY)
 
-                sleep(RATE_LIMIT_DELAY)
-                try:
-                    d = self._api.get_flight_details(_FlightProxy(flight_id))
-                except Exception as e:
-                    print(f"Calendar: get_flight_details failed for {iata_num} id={flight_id}: {e}")
-                    continue
+            try:
+                d = self._api.get_flight_details(match)
+            except Exception as e:
+                print(f"Calendar: get_flight_details failed for {target_callsign}: {e}")
+                return None
 
-                # Skip if the flight has already landed
-                t = self.safe_get(d, "time") or {}
-                real_arrival = self.safe_get(t, "real", "arrival")
-                if real_arrival:
-                    print(f"Calendar: {iata_num} already landed (real arrival={real_arrival})")
-                    continue
+            # Skip if the flight has already landed
+            t = self.safe_get(d, "time") or {}
+            real_arrival = self.safe_get(t, "real", "arrival")
+            if real_arrival:
+                print(f"Calendar: {target_callsign} already landed (real arrival={real_arrival})")
+                return None
 
-                # Prefer trail (most recent position) over search detail
-                trail = d.get("trail", [])
-                if trail:
-                    pos = trail[0]
-                    lat = pos.get("lat")
-                    lon = pos.get("lng")
-                    alt = pos.get("alt", 0)
-                else:
-                    lat = detail.get("lat")
-                    lon = detail.get("lon")
-                    alt = detail.get("alt", 0)
+            lat = match.latitude
+            lon = match.longitude
+            alt = match.altitude
 
-                if lat is None or lon is None:
-                    print(f"Calendar: no position data for {iata_num}")
-                    continue
-                if alt < MIN_ALTITUDE:
-                    print(f"Calendar: {iata_num} altitude {alt} below minimum {MIN_ALTITUDE}, skipping")
-                    continue
+            if lat is None or lon is None:
+                print(f"Calendar: no position data for {target_callsign}")
+                return None
+            if alt < MIN_ALTITUDE:
+                print(f"Calendar: {target_callsign} altitude {alt} below minimum {MIN_ALTITUDE}, skipping")
+                return None
 
-                print(f"Calendar: {iata_num} is airborne at {lat},{lon} alt={alt} — pinning display")
+            print(f"Calendar: {target_callsign} is airborne at {lat},{lon} alt={alt} — pinning display")
 
-                def clean_code(val):
-                    if not val or str(val).upper() in BLANK_FIELDS:
-                        return ""
-                    return val
+            def clean_code(val):
+                if not val or str(val).upper() in BLANK_FIELDS:
+                    return ""
+                return val
 
-                plane   = self.safe_get(d, "aircraft", "model", "code", default="")
-                airline = self.safe_get(d, "airline", "name", default="")
+            plane   = self.safe_get(d, "aircraft", "model", "code", default="") or match.airline_icao or ""
+            airline = self.safe_get(d, "airline", "name", default="")
 
-                origin      = clean_code(self.safe_get(d, "airport", "origin", "code", "iata", default=""))
-                destination = clean_code(self.safe_get(d, "airport", "destination", "code", "iata", default=""))
+            origin      = clean_code(match.origin_airport_iata)
+            destination = clean_code(match.destination_airport_iata)
 
-                origin_lat = self.safe_get(d, "airport", "origin", "position", "latitude")
-                origin_lon = self.safe_get(d, "airport", "origin", "position", "longitude")
-                dest_lat   = self.safe_get(d, "airport", "destination", "position", "latitude")
-                dest_lon   = self.safe_get(d, "airport", "destination", "position", "longitude")
+            origin_lat = self.safe_get(d, "airport", "origin", "position", "latitude")
+            origin_lon = self.safe_get(d, "airport", "origin", "position", "longitude")
+            dest_lat   = self.safe_get(d, "airport", "destination", "position", "latitude")
+            dest_lon   = self.safe_get(d, "airport", "destination", "position", "longitude")
 
-                dist_o    = haversine(lat, lon, origin_lat, origin_lon) if origin_lat else 0
-                dist_d    = haversine(lat, lon, dest_lat,   dest_lon)   if dest_lat   else 0
-                dist_home = haversine(lat, lon, LOCATION_DEFAULT[0], LOCATION_DEFAULT[1])
+            dist_o    = haversine(lat, lon, origin_lat, origin_lon) if origin_lat else 0
+            dist_d    = haversine(lat, lon, dest_lat,   dest_lon)   if dest_lat   else 0
+            dist_home = haversine(lat, lon, LOCATION_DEFAULT[0], LOCATION_DEFAULT[1])
 
-                callsign   = detail.get("callsign") or item.get("label", iata_num) or iata_num
-                owner_icao = self.safe_get(d, "owner", "code", "icao", default="") or ""
-                owner_iata = self.safe_get(d, "airline", "code", "iata", default="") or "N/A"
+            owner_icao = self.safe_get(d, "owner", "code", "icao", default="") or match.airline_icao or ""
+            owner_iata = match.airline_iata or "N/A"
 
-                # Reuse plane_bearing with a lightweight proxy
-                _pos = type("_P", (), {"latitude": lat, "longitude": lon})()
-                direction = degrees_to_cardinal(plane_bearing(_pos))
+            direction = degrees_to_cardinal(plane_bearing(match))
 
-                return {
-                    "airline":    airline,
-                    "plane":      plane,
-                    "origin":     origin,
-                    "origin_latitude":       origin_lat,
-                    "origin_longitude":      origin_lon,
-                    "destination":           destination,
-                    "destination_latitude":  dest_lat,
-                    "destination_longitude": dest_lon,
-                    "plane_latitude":        lat,
-                    "plane_longitude":       lon,
-                    "owner_iata":            owner_iata,
-                    "owner_icao":            owner_icao,
-                    "time_scheduled_departure": self.safe_get(t, "scheduled", "departure"),
-                    "time_scheduled_arrival":   self.safe_get(t, "scheduled", "arrival"),
-                    "time_real_departure":      self.safe_get(t, "real", "departure"),
-                    "time_estimated_arrival":   self.safe_get(t, "estimated", "arrival"),
-                    "vertical_speed": 0,
-                    "callsign":  callsign,
-                    "distance_origin":      dist_o,
-                    "distance_destination": dist_d,
-                    "distance":  dist_home,
-                    "direction": direction,
-                }
+            return {
+                "airline":    airline,
+                "plane":      plane,
+                "origin":     origin,
+                "origin_latitude":       origin_lat,
+                "origin_longitude":      origin_lon,
+                "destination":           destination,
+                "destination_latitude":  dest_lat,
+                "destination_longitude": dest_lon,
+                "plane_latitude":        lat,
+                "plane_longitude":       lon,
+                "owner_iata":            owner_iata,
+                "owner_icao":            owner_icao,
+                "time_scheduled_departure": self.safe_get(t, "scheduled", "departure"),
+                "time_scheduled_arrival":   self.safe_get(t, "scheduled", "arrival"),
+                "time_real_departure":      self.safe_get(t, "real", "departure"),
+                "time_estimated_arrival":   self.safe_get(t, "estimated", "arrival"),
+                "vertical_speed": match.vertical_speed,
+                "callsign":  match.callsign or iata_num,
+                "distance_origin":      dist_o,
+                "distance_destination": dist_d,
+                "distance":  dist_home,
+                "direction": direction,
+            }
 
         except Exception as exc:
             print(f"Calendar flight lookup error ({iata_num}): {exc}")
